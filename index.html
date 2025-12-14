@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Simple MindMap</title>
+    <style>
+        :root {
+            --bg-color: #f8f9fa;
+            --line-color: #ccc;
+            --node-bg: #fff;
+            --node-border: #007bff;
+            --node-text: #333;
+            --selected-border: #ff9800;
+        }
+
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: var(--bg-color);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            touch-action: none;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        #canvas-container {
+            width: 100%;
+            height: 100%;
+            position: relative;
+            cursor: grab;
+            transform-origin: 0 0;
+        }
+
+        #canvas-container:active {
+            cursor: grabbing;
+        }
+
+        svg {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* SVGはクリックを透過 */
+            z-index: 0;
+        }
+
+        path {
+            stroke: var(--line-color);
+            stroke-width: 2;
+            fill: none;
+            transition: stroke 0.2s;
+        }
+
+        .node {
+            position: absolute;
+            background: var(--node-bg);
+            border: 2px solid var(--node-border);
+            border-radius: 8px;
+            padding: 10px 15px;
+            min-width: 60px;
+            max-width: 200px;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            user-select: none;
+            cursor: pointer;
+            z-index: 1;
+            transition: transform 0.1s, box-shadow 0.2s;
+            font-size: 14px;
+            outline: none;
+        }
+
+        .node:hover {
+            transform: scale(1.02);
+            box-shadow: 0 6px 10px rgba(0,0,0,0.15);
+        }
+
+        .node.selected {
+            border-color: var(--selected-border);
+            box-shadow: 0 0 0 3px rgba(255, 152, 0, 0.3);
+            z-index: 10;
+        }
+
+        .node[contenteditable="true"] {
+            cursor: text;
+            background: #fffbe6;
+        }
+
+        #toolbar {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(255, 255, 255, 0.9);
+            padding: 10px 20px;
+            border-radius: 50px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+            display: flex;
+            gap: 15px;
+            z-index: 100;
+            backdrop-filter: blur(5px);
+        }
+
+        .tool-btn {
+            background: none;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
+            color: #555;
+        }
+
+        .tool-btn:hover {
+            background: #eee;
+            color: #000;
+        }
+
+        .tool-btn:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+        
+        #debug {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            font-size: 10px;
+            color: #aaa;
+            pointer-events: none;
+        }
+
+    </style>
+
+    <!-- PWA Settings -->
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" type="image/png" href="icon-192.png">
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('service-worker.js');
+        }
+    </script>
+</head>
+<body>
+
+    <div id="canvas-container">
+        <svg id="connections"></svg>
+        <div id="nodes-layer"></div>
+    </div>
+
+    <div id="toolbar">
+        <button class="tool-btn" id="btn-add" title="Add Child Node">＋</button>
+        <button class="tool-btn" id="btn-delete" title="Delete Node">🗑️</button>
+        <button class="tool-btn" id="btn-reset" title="Reset View">🏠</button>
+        <button class="tool-btn" id="btn-save" title="Save Map">💾</button>
+    </div>
+
+    <!-- <div id="debug">v1.0</div> -->
+
+<script>
+    const canvasContainer = document.getElementById('canvas-container');
+    const nodesLayer = document.getElementById('nodes-layer');
+    const svgLayer = document.getElementById('connections');
+    
+    // State
+    let nodes = []; // { id, text, x, y, parentId }
+    let selectedNodeId = null;
+    let nextId = 1;
+    
+    // Pan & Zoom (Simplified: just Pan for now)
+    let offset = { x: 0, y: 0 };
+    let isPanning = false;
+    let panStart = { x: 0, y: 0 };
+
+    // Dragging Node
+    let isDraggingNode = false;
+    let dragStartOffset = { x: 0, y: 0 };
+    
+    // Config
+    const ROOT_X = window.innerWidth / 2;
+    const ROOT_Y = window.innerHeight / 2;
+
+    // --- Core Functions ---
+
+    function init() {
+        loadFromStorage();
+        if (nodes.length === 0) {
+            createNode(null, "Central Idea", ROOT_X, ROOT_Y);
+        }
+        render();
+        centerView();
+    }
+
+    function createNode(parentId, text, x, y) {
+        const id = nextId++;
+        // If parent exists, place nearby if x,y not provided
+        if (x === undefined || y === undefined) {
+            const parent = nodes.find(n => n.id === parentId);
+            if (parent) {
+                // Random scatter around parent
+                const angle = Math.random() * Math.PI * 2;
+                const dist = 150;
+                x = parent.x + Math.cos(angle) * dist;
+                y = parent.y + Math.sin(angle) * dist;
+            } else {
+                x = ROOT_X;
+                y = ROOT_Y;
+            }
+        }
+        
+        const newNode = { id, text, x, y, parentId };
+        nodes.push(newNode);
+        selectNode(id);
+        render();
+        saveToStorage();
+        return newNode;
+    }
+
+    function deleteNode(id) {
+        const node = nodes.find(n => n.id === id);
+        if (!node) return;
+        if (!node.parentId && nodes.length > 1) {
+            alert("Cannot delete the root node unless it's the only one.");
+            return; // Protect root if children exist? Or allow deleting subtree?
+            // Let's implement recursive delete for subtree
+        }
+
+        // Recursive delete
+        const toDelete = [id];
+        let i = 0;
+        while(i < toDelete.length) {
+            const currentId = toDelete[i];
+            const children = nodes.filter(n => n.parentId === currentId);
+            children.forEach(c => toDelete.push(c.id));
+            i++;
+        }
+
+        nodes = nodes.filter(n => !toDelete.includes(n.id));
+        selectedNodeId = null;
+        render();
+        saveToStorage();
+    }
+
+    function updateNodePosition(id, x, y) {
+        const node = nodes.find(n => n.id === id);
+        if (node) {
+            node.x = x;
+            node.y = y;
+            updateLines();
+        }
+    }
+
+    function updateNodeText(id, text) {
+        const node = nodes.find(n => n.id === id);
+        if (node) {
+            node.text = text;
+            saveToStorage(); // Save text change
+        }
+    }
+
+    function selectNode(id) {
+        selectedNodeId = id;
+        document.querySelectorAll('.node').forEach(el => {
+            el.classList.toggle('selected', parseInt(el.dataset.id) === id);
+        });
+        updateToolbar();
+    }
+
+    // --- Rendering ---
+
+    function render() {
+        // Clear existing
+        nodesLayer.innerHTML = '';
+        svgLayer.innerHTML = '';
+
+        // Draw Nodes
+        nodes.forEach(node => {
+            const el = document.createElement('div');
+            el.className = 'node';
+            el.dataset.id = node.id;
+            el.innerText = node.text;
+            el.style.left = node.x + 'px';
+            el.style.top = node.y + 'px';
+            el.style.transform = `translate(-50%, -50%)`; // Center anchor
+            
+            if (node.id === selectedNodeId) el.classList.add('selected');
+
+            // Events
+            el.addEventListener('mousedown', (e) => onNodeDown(e, node));
+            el.addEventListener('touchstart', (e) => onNodeTouch(e, node), {passive: false});
+            
+            // Editable
+            el.addEventListener('dblclick', () => makeEditable(el, node.id));
+
+            nodesLayer.appendChild(el);
+        });
+
+        updateLines();
+        updateToolbar();
+    }
+
+    function updateLines() {
+        svgLayer.innerHTML = '';
+        nodes.forEach(node => {
+            if (node.parentId) {
+                const parent = nodes.find(n => n.id === node.parentId);
+                if (parent) {
+                    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                    // Cubic Bezier curve
+                    const d = `M ${parent.x} ${parent.y} Q ${(parent.x + node.x)/2} ${parent.y} ${node.x} ${node.y}`;
+                    // Or straight line: `M ${parent.x} ${parent.y} L ${node.x} ${node.y}`
+                    // Simple Curve
+                    const dx = node.x - parent.x;
+                    const dy = node.y - parent.y;
+                    const c1x = parent.x + dx * 0.5;
+                    const c1y = parent.y; // horizontal priority
+                    
+                    // path.setAttribute('d', `M ${parent.x} ${parent.y} C ${parent.x} ${parent.y + dy/2}, ${node.x} ${node.y - dy/2}, ${node.x} ${node.y}`);
+                    path.setAttribute('d', `M ${parent.x} ${parent.y} L ${node.x} ${node.y}`);
+                    
+                    svgLayer.appendChild(path);
+                }
+            }
+        });
+    }
+
+    function makeEditable(el, id) {
+        el.contentEditable = true;
+        el.focus();
+        
+        // Select all text
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+
+        const onBlur = () => {
+            el.contentEditable = false;
+            updateNodeText(id, el.innerText);
+        };
+        
+        el.addEventListener('blur', onBlur, {once: true});
+        el.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                el.blur();
+            }
+        });
+    }
+
+    // --- Interaction ---
+
+    // Canvas Panning
+    canvasContainer.addEventListener('mousedown', e => {
+        if (e.target === canvasContainer || e.target === svgLayer) {
+            isPanning = true;
+            panStart = { x: e.clientX - offset.x, y: e.clientY - offset.y };
+            selectNode(null); // Deselect
+        }
+    });
+
+    window.addEventListener('mousemove', e => {
+        if (isPanning) {
+            offset.x = e.clientX - panStart.x;
+            offset.y = e.clientY - panStart.y;
+            applyTransform();
+        }
+        if (isDraggingNode && selectedNodeId) {
+            // Apply zoom/pan inverse logic if we had zoom, but now just offset
+            const x = (e.clientX - offset.x); // Simple pan correction
+            const y = (e.clientY - offset.y);
+            updateNodePosition(selectedNodeId, x, y);
+            
+            // Move DOM element directly for performance (optional, full render does it too)
+            const el = document.querySelector(`.node[data-id="${selectedNodeId}"]`);
+            if(el) {
+                el.style.left = x + 'px';
+                el.style.top = y + 'px';
+            }
+            // Update lines continuously
+            // updateLines(); // Can be heavy, maybe throttle?
+        }
+    });
+
+    window.addEventListener('mouseup', () => {
+        if (isDraggingNode) {
+            saveToStorage(); // Save position after drag
+            updateLines(); // Ensure lines are correct
+        }
+        isPanning = false;
+        isDraggingNode = false;
+    });
+
+    // Node Dragging
+    function onNodeDown(e, node) {
+        e.stopPropagation(); // Stop canvas panning
+        selectNode(node.id);
+        isDraggingNode = true;
+        // Calculate offset if needed, but centering is easier logic
+    }
+    
+    // Touch Support
+    function onNodeTouch(e, node) {
+        e.stopPropagation();
+        selectNode(node.id);
+        isDraggingNode = true;
+        // e.preventDefault(); // Might block scrolling?
+    }
+    
+    // Prevent default touch actions for canvas (scrolling)
+    canvasContainer.addEventListener('touchmove', (e) => {
+        e.preventDefault();
+        // Implement touch panning/dragging logic here if needed for mobile
+        // Simplified: use Mouse event mapping if possible, or separate logic
+        const touch = e.touches[0];
+        if (isDraggingNode && selectedNodeId) {
+             const x = (touch.clientX - offset.x);
+             const y = (touch.clientY - offset.y);
+             updateNodePosition(selectedNodeId, x, y);
+             const el = document.querySelector(`.node[data-id="${selectedNodeId}"]`);
+             if(el) {
+                 el.style.left = x + 'px';
+                 el.style.top = y + 'px';
+             }
+        }
+    }, {passive: false});
+
+
+    function applyTransform() {
+        nodesLayer.style.transform = `translate(${offset.x}px, ${offset.y}px)`;
+        svgLayer.style.transform = `translate(${offset.x}px, ${offset.y}px)`;
+    }
+    
+    function centerView() {
+        offset = { x: 0, y: 0 };
+        applyTransform();
+    }
+
+    // --- Toolbar Actions ---
+
+    document.getElementById('btn-add').addEventListener('click', () => {
+        if (selectedNodeId) {
+            createNode(selectedNodeId, "New Idea");
+        } else {
+            alert("Select a node to attach to.");
+        }
+    });
+
+    document.getElementById('btn-delete').addEventListener('click', () => {
+        if (selectedNodeId) {
+            if(confirm("Delete this node?")) {
+                deleteNode(selectedNodeId);
+            }
+        }
+    });
+
+    document.getElementById('btn-reset').addEventListener('click', centerView);
+    
+    document.getElementById('btn-save').addEventListener('click', () => {
+        saveToStorage();
+        alert("Saved to local storage!");
+    });
+
+    function updateToolbar() {
+        const hasSelection = !!selectedNodeId;
+        document.getElementById('btn-add').disabled = !hasSelection;
+        document.getElementById('btn-delete').disabled = !hasSelection;
+    }
+
+    // --- Storage ---
+    const STORAGE_KEY = 'mindmap_data_v1';
+    
+    function saveToStorage() {
+        const data = {
+            nodes: nodes,
+            nextId: nextId
+        };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    }
+
+    function loadFromStorage() {
+        const json = localStorage.getItem(STORAGE_KEY);
+        if (json) {
+            const data = JSON.parse(json);
+            nodes = data.nodes;
+            nextId = data.nextId;
+        }
+    }
+
+    // --- Start ---
+    init();
+
+</script>
+</body>
+</html>
